@@ -8,6 +8,7 @@ library altera;
 use altera.altera_primitives_components.all;
 library work;
 use work.global_def_package.all;
+use work.xge_package.all;
 use work.test_package.all;
 use work.s5_source_probe_package.all;
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -79,7 +80,14 @@ entity top is
 		i_SFP_REFCLK_p										: in std_logic := '0';
 		-- Programmalbe Oscillator SI570
 		o_CLOCK_SCL											: out std_logic := '0';
-		io_CLOCK_SDA										: inout std_logic := '0'
+		io_CLOCK_SDA										: inout std_logic := '0';
+		-- Fan
+		io_FAN_CTRL											: inout std_logic := '0';
+		-- Temperature
+		o_TEMP_CLK											: out std_logic := '0';
+		io_TEMP_DATA										: inout std_logic := '0';
+		i_TEMP_INT_n										: in std_logic := '0';
+		i_TEMP_OVERT_n										: in std_logic := '0'
 	);
 end entity;
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -101,7 +109,8 @@ component xge_main is
 		o_xge_N_tx_serial_data								: out std_logic_vector(C_SFP_N_CHANNEL-1 downto 0) := (others => '0');
 		i_xge_N_rx_serial_data								: in std_logic_vector(C_SFP_N_CHANNEL-1 downto 0) := (others => '0');
 		--
-		i_rcd_source_probe									: in t_rcd_s5_source_probe := ci_t_rcd_s5_source_probe
+		i_rcd_source_probe									: in t_rcd_s5_source_probe := ci_t_rcd_s5_source_probe;
+		i_rcd_temperature									: in t_rcd_temperature := ci_t_rcd_temperature
 	);
 end component;
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -136,6 +145,25 @@ component s5_source_probe is
 	);
 end component;
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+component s5_temperature is
+	port
+	(
+		i_clk								: in std_logic := '0';										-- 50МГц
+		o_TEMP_CLK							: out std_logic := '1';										-- i2c
+		io_TEMP_DATA						: inout std_logic := '1';									-- i2c
+		o_TempByte							: out std_logic_vector(7 downto 0) := (others => '0');		-- результирующее прочитанное слово
+		--
+		o_TempByte_L_valid					: out std_logic := '0';										-- 
+		o_TempByte_L						: out std_logic_vector(7 downto 0) := (others => '0');		-- 
+		o_TempByte_R_valid					: out std_logic := '0';										-- 
+		o_TempByte_R						: out std_logic_vector(7 downto 0) := (others => '0');		-- 
+		o_TempByte_MAN_ID_valid				: out std_logic := '0';										-- 
+		o_TempByte_MAN_ID					: out std_logic_vector(7 downto 0) := (others => '0');		-- 
+		o_TempByte_DEV_ID_valid				: out std_logic := '0';										-- 
+		o_TempByte_DEV_ID					: out std_logic_vector(7 downto 0) := (others => '0')		-- 
+	);
+end component;
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 constant CT_ANTI_SHATTER									: integer := 50000;
 --
 signal cpu_reset_2w_clk50									: std_logic := '0';
@@ -164,6 +192,12 @@ signal s5_source_probe_o_rcd								: t_rcd_s5_source_probe := ci_t_rcd_s5_sourc
 signal cmp_s5_pll_644_i_rst									: std_logic := '0';
 signal cmp_s5_pll_644_o_clk_50								: std_logic := '0';
 signal cmp_s5_pll_644_o_locked								: std_logic := '0';
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+signal fan_init_f											: std_logic := '0';
+signal fan_turn_on_prev										: std_logic := '0';
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+signal rcd_s5_temperature									: t_rcd_temperature := ci_t_rcd_temperature;
+signal s5_temperature_o_TempByte							: std_logic_vector(7 downto 0) := (others => '0');
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 signal LEDS													: std_logic_vector(3 downto 0) := (others => '0');
 signal led0_cnt												: std_logic_vector(31 downto 0) := (others => '0');
@@ -222,8 +256,34 @@ begin
 		o_xge_N_tx_serial_data								=> xge_N_tx_serial_data,
 		i_xge_N_rx_serial_data								=> xge_N_rx_serial_data,
 		--
-		i_rcd_source_probe									=> s5_source_probe_o_rcd
+		i_rcd_source_probe									=> s5_source_probe_o_rcd,
+		i_rcd_temperature									=> rcd_s5_temperature
 	);
+	------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+	process(i_clk_50_B3B)
+	begin
+		if (rising_edge(i_clk_50_B3B)) then
+			if (s5_source_probe_o_rcd.sfp.valid = '1') then
+				o_SFPA_RATESEL								<= s5_source_probe_o_rcd.sfp.RATESEL;
+				o_SFPA_TXDISABLE							<= s5_source_probe_o_rcd.sfp.TXDISABLE;
+				o_SFPB_RATESEL								<= s5_source_probe_o_rcd.sfp.RATESEL;
+				o_SFPB_TXDISABLE							<= s5_source_probe_o_rcd.sfp.TXDISABLE;
+				o_SFPC_RATESEL								<= s5_source_probe_o_rcd.sfp.RATESEL;
+				o_SFPC_TXDISABLE							<= s5_source_probe_o_rcd.sfp.TXDISABLE;
+				o_SFPD_RATESEL								<= s5_source_probe_o_rcd.sfp.RATESEL;
+				o_SFPD_TXDISABLE							<= s5_source_probe_o_rcd.sfp.TXDISABLE;
+			else
+				o_SFPA_RATESEL								<= (others => '0');
+				o_SFPA_TXDISABLE							<= '0';
+				o_SFPB_RATESEL								<= (others => '0');
+				o_SFPB_TXDISABLE							<= '0';
+				o_SFPC_RATESEL								<= (others => '0');
+				o_SFPC_TXDISABLE							<= '0';
+				o_SFPD_RATESEL								<= (others => '0');
+				o_SFPD_TXDISABLE							<= '0';
+			end if;
+		end if;
+	end process;
 	------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 	
 	
@@ -277,7 +337,7 @@ begin
 	
 	
 	--======================================================================================================================================================================
-	--  Configure SI570 as 644.5312 MHz
+	-- Configure SI570 as 644.5312 MHz
 	--======================================================================================================================================================================
 	process(i_clk_50_B3B)
 	begin
@@ -328,7 +388,7 @@ begin
 	
 	
 	--======================================================================================================================================================================
-	--  Source Probe (Virtual Buttons)
+	-- Source Probe (Virtual Buttons)
 	--======================================================================================================================================================================
 	s5_source_probe_x : s5_source_probe
 	port map
@@ -340,7 +400,7 @@ begin
 	
 	
 	--======================================================================================================================================================================
-	--  Source Probe (Virtual Buttons)
+	-- Source Probe (Virtual Buttons)
 	--======================================================================================================================================================================
 	cmp_s5_pll_644_x : cmp_s5_pll_644
 	port map
@@ -354,10 +414,11 @@ begin
 	
 	
 	--======================================================================================================================================================================
-	--  LEDS
+	-- LEDS
 	--======================================================================================================================================================================
 	o_LED(0)												<= LEDS(0);
 	o_LED(1)												<= LEDS(1);
+	o_LED(2)												<= LEDS(2);
 	o_LED(3)												<= i_BUTTONS(3);
 	--
 	process(i_clk_50_B3B)
@@ -376,5 +437,46 @@ begin
 		end if;	
 	end process;
 	------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+	
+	
+	--======================================================================================================================================================================
+	-- FAN
+	--======================================================================================================================================================================
+	process(i_clk_50_B3B)
+	begin
+		if (rising_edge(i_clk_50_B3B)) then
+			if (fan_init_f = '0') then
+				fan_init_f									<= '1';
+				io_FAN_CTRL									<= '1';
+			end if;
+			--
+			fan_turn_on_prev								<= s5_source_probe_o_rcd.main.fan_turn_on;
+			if (s5_source_probe_o_rcd.main.fan_turn_on /= fan_turn_on_prev) then
+				io_FAN_CTRL									<= s5_source_probe_o_rcd.main.fan_turn_on;
+			end if;
+		end if;	
+	end process;
+	------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+	
+	--======================================================================================================================================================================
+	-- TTemperature MAX1619
+	--======================================================================================================================================================================
+	s5_temperature_x : s5_temperature
+	port map
+	(
+		i_clk												=> i_clk_50_B3B,
+		o_TEMP_CLK											=> o_TEMP_CLK,
+		io_TEMP_DATA										=> io_TEMP_DATA,
+		o_TempByte											=> s5_temperature_o_TempByte,
+		--
+		o_TempByte_L_valid									=> rcd_s5_temperature.T_L_valid,
+		o_TempByte_L										=> rcd_s5_temperature.T_L,
+		o_TempByte_R_valid									=> rcd_s5_temperature.T_R_valid,
+		o_TempByte_R										=> rcd_s5_temperature.T_R,
+		o_TempByte_MAN_ID_valid								=> rcd_s5_temperature.MAN_ID_valid,
+		o_TempByte_MAN_ID									=> rcd_s5_temperature.MAN_ID,
+		o_TempByte_DEV_ID_valid								=> rcd_s5_temperature.DEV_ID_valid,
+		o_TempByte_DEV_ID									=> rcd_s5_temperature.DEV_ID
+	);
 	
 end rtl;
